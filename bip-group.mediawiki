@@ -1,0 +1,167 @@
+<pre>
+  BIP: XXX
+  Layer: Consensus (soft fork)
+  Title: SIGHASH\_GROUP for Taproot Scripts
+  Author:
+  Comments-Summary: No comments yet.
+  Comments-URI:
+  Status: Draft
+  Type: Standards Track
+  Created: 2021-11-02
+  License: BSD-3-Clause
+  Requires: 118
+</pre>
+
+== Abstract ==
+
+This BIP describes a new type of signature hash encoding for 33-byte BIP 118 public key.
+It allows signatures for these public keys to commit to arbitrary bundle of inputs and outputs.
+This enables aggregation of pre-signed transactions for efficient fee-bumping in the context
+of off-chain protocols.
+
+== Motivation ==
+
+Off-chain protocols rely on the unilateral ability for a counterparty to spend a share-owned utxo
+with a chain of pre-signed transaction, thus enforcing on-chain a balance negotiated off-chain.
+
+A non-cooperative closing can happen in presence of time-sensitive outputs, where the feerate
+efficiency is a factor of the off-chain balance safety. In that situation, smaller chain of pre-
+signed transactions increase the balance safety for a constant level of fee-bumping reserve.
+
+A non-cooperative closing can also happen in the absence of time-sensitive outputs, where the
+feerate efficiency is a factor of the off-chain liquidity velocity. In that situation, smaller
+chain of pre-signed transactions decrease the cost of capital reallocation.
+
+Beyond off-chain protocols node operators, smaller chain of pre-signed transactions due to a
+more efficient fee-bumping mechanism is of interest to any transaction issuer as it makes a better
+usage of the common blockspace.
+
+This proposal modifies the behavior of the transaction digest algorithm used in the signature
+creation and verification, in function of a new annex field signaling the bundling of inputs and
+outputs. Bundling inputs and outputs allows to aggregate chain of pre-signed transactions from
+different context with a single fee-bumping pair of input and output, with minimal feerate overhead.
+
+This proposal also introduces further malleability extensions where the output fields can be 
+selectively blanked from the signature digest. Combined with OP\_MERKLESUB, this extension enables
+the generation of trustless malleable transactions, of which the value and scriptpubkey can be
+modified at broadcast by the transaction finalizer. This mechanism enables to build large and 
+non-ordered graph of withdraw transactions in the context of payment pools.
+
+== Specification ==
+
+This BIP modifies the behaviour of the BIP 342 signatures opcodes (<code>CHECKSIG</code>,
+<code>CHECKSIGVERIFY</code>, and <code>CHECKSIGADD</code>) for BIP 118 public keys.
+
+The core of this change is to allow locking a certain part of transaction data (more specifically,
+inputs and outputs within a certain bundle) at the signature time. To achieve this, we need two
+mechanisms :
+1. The way to specify bundling between inputs and outputs
+2. The way to enforce this bundling under the signature
+
+(1) is achieved within the annex field we will describe in the next section, and (2) achieved while
+hashing the annex field right before producing a signature over that hash, which we describe later.
+
+=== Annex field ===
+
+The annex field <code>0x00</code> is reserved for the <code>ANNEX\_GROUP</code> tag.
+
+The annex field <code>0x01</code> is reserved for the <code>ANNEX\_ANYPUBKEY</code> tag.
+
+The annex field <code>0x02</code> is reserved for the <code>ANNEX\_ANYAMOUNT</code> tag.
+
+The <code>ANNEX\_GROUP</code> value record is called the <code>nGroupCount</code> and interpreted as a VarInt.
+
+The <code>ANNEX\_ANYPUBKEY</code> value record is interpreted as a bitmap, where a set bit stands
+for the corresponding output at the same index opt-ing out from <code>scriptPubKey</code> signature
+digest commitment.
+
+The <code>ANNEX\_ANYAMOUNT</code> value record is interpreted as a bitmap, where a set bit stands
+for the corresponding output at the same index opt-ing out from <code>amount</code> signature
+digest commitment.
+
+=== Rules for the group state pair ===
+
+A new state pair is declared at validation of a transaction. The pair is initialized to a tuple of
+two 32-byte integers of values 0, respectively <code>start</code> and <code>end</code>.
+
+The following rules only apply when the output spent is a Taproot output with version number 1, and a 32-byte witness program.
+
+* If the <code>ANNEX\_GROUP</code> field is absent of the annex, set <code>start</code> equal to <code>end</code>.
+* If the <code>ANNEX\_GROUP</code> field is present and <code>nGroupCount</code> is equal to 0, leave <code>start</code> and <code>end</code> unchanged.
+* If the <code>ANNEX\_GROUP</code> field is present and <code>nGroupCount</code> is superior to 0, set <code>start</code> equal to <code>end</code> then <code>end</code> equal to <code>start + nGroupCount</code>.
+
+=== Rules for the outputs commitment modifiers ===
+
+The following restrictions apply and cause validation failure if violated:
+
+* If the <code>ANNEX\_ANYPUBKEY</code> field is present and the <code>ANNEX\_GROUP</code> field is absent.
+* If the <code>ANNEX\_ANYAMOUNT</code> field is present and the <code>ANNEX\_GROUP</code> field is absent.
+
+=== Signature message ===
+
+The parameter ''signature hash\_type'' is an 8-bit unsigned value, reusing values defined in BIP 118.
+
+We define the following constant using bit 8 of <code>hash\_type</code>:
+
+* <code>SIGHASH\_GROUP = 0x8</code>
+
+As per BIP 341, the parameter ''ext\_flag'' is an integer in the range 0-127, used for indicating
+that extensions are added at the end of the message.
+
+A new transaction digest algorithm is defined for ''hash\_type \& 3'' equal <code>SIGHASH\_GROUP</code>:
+  Double SHA256 of the serialization of:
+     1. signature hash\_type (1-byte)
+     2. nVersion of the transaction (4-byte little endian)
+     3. nLocktime of the transaction (4-byte little endian)
+     4. sha\_prevouts (32-byte hash) the SHA256 of the serialization of all input outpoints
+     5. sha\_amounts (32-byte hash) the SHA256 of the serialization of all spent output amounts
+     6. sha\_scriptpubkeys (32-byte hash) the SHA256 of the serialization of all spent output scriptPubKeys
+     7. sha\_sequences (32-byte hash) the SHA256 of the serialization of all input nSequence
+     8. sha\_outputs (32-byte hash) the SHA256 of the serialization of all outputs in the range <code>start</code> included to <code>end</code> excluded
+     6. spend\_type (1-byte) equal to ''(ext\_flag * 2) + annex\_present'', where ''annex\_present'' is 0 if no annex is present, or 1 otherwise (the original witness stack has two or more witness elements, and the first byte of the last element is ''0x50'')
+     7. input\_index (4-byte little endian) index of this input in the transaction input vector
+     9. sha\_annex (32-byte hash) the SHA256 of ''(compact\_size(size of annex) || annex)'', where ''annex'' includes the mandatory ''0x50'' prefix
+
+The following restrictions apply and cause validation failure if violated:
+
+* If <code>start</code> is equal to <code>end</code>.
+* If <code>end</code> is superior to the number of outputs.
+* If the value committed of the group outputs amounts is NOT equal to the input amount one
+
+The signature verification is proceeded as defined in BIP 118.
+
+''sha\_outputs'':
+* If an output has a corresponding bit set in the ANYPUBKEY bitmap:
+        * The ''scriptPubKey'' must be omitted from the hash.
+* If an output has a corresponding bit set in the ANYAMOUNT bitmap:
+        * The ''nValue'' must be omitted from the hash.
+
+== Security ==
+
+=== Malleability ===
+
+Output bundling signature schemes enabling to construct overlapping set of inputs-outputs have
+unsafe usages for the protocol and wallet designers. Assuming ''x'' designate inputs and ''y''
+outputs, existence of bundles ''(x1, y1, y2)'' and ''(x2, y1, y2)'' allows a third-party to
+assemble a transaction ''(x1, x2, y1, y2, y3)'', where ''y3'' is a siphoning output. This output
+captures the input value of ''x2'' towards a <code>scriptPubKey</code>, non-expected by the bundle
+signer.
+
+By design, <code>SIGHASH\_GROUP</code> prevents silent overlapping bundles due to <code>nGroupCount</code>
+being relative to the transaction-level state pair. Two bundles with <code>nGroupCount</code> superior
+to 0 cannot overlap in absolute transaction position. In the above case, for ''x1'' and ''x2'' to
+be valid in a single spent, ''(y1, y2)'' must be duplicated in the spending transaction.
+
+However, an implementator aiming to overlap bundle can set <code>nGroupCount</code> of one of the bundle
+to 0. Implementator should ensure the overlapping set of outputs is only valid for spent when the
+total value of bundled inputs have been combined.
+
+== Copyright ==
+
+This document is licensed under the 3-clause BSD license.
+
+== Acknowledgement ==
+
+This idea was originally described as SIGHASH_BUNLDE.
+
+This proposal enriches the idea with additional modifiers (''ANYPUBKEY''/''ANYAMOUNT'').

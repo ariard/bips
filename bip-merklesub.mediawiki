@@ -1,0 +1,102 @@
+<pre>
+  BIP: XXX
+  Layer: Consensus (soft fork)
+  Title: OP\_MERKLESUB
+  Author:
+  Comments-Summary: No comments yet.
+  Comments-URI:
+  Status: Draft
+  Type: Standards Track
+  Created: 2021-11-02
+  License: BSD-3-Clause
+  Requires: BIP118, SIGHASH\_GROUP
+</pre>
+
+==Abstract==
+
+This BIP describes a new script interpreter operation for Taproot outputs.
+It allows to enforce that spending a given Taproot UTXO can only happen into an output for which
+its scriptPubKey is derived from the scriptPubKey being spent in a certain way pre-defined by this
+new operation.
+This flexibility enables to construct advanced off-chain protocols such as payment pools
+or vaults.
+
+==Motivation==
+
+Off-chain protocols security relies on the ability for a participant to withdraw a balance without
+cooperation of the counterparties at any point during the lifetime of the protocol. This withdrawing
+proceeds by publishing on-chain a pre-signed transaction, of which the occurence also terminates
+the protocol.
+
+If this behavior is not an issue for two-party off-chain protocols, as there is no interest to
+continue the operations once one counterparty has exited, it is more problematic for multi-party
+off-chain protocols (e.g Channel Factories). Those constructions suffers from a fault-tolerance issue,
+where one on-chain withdraw from a single counterparty affects the usage of all the remaining ones. 
+Once the off-chain state confirmed on-chain, one or more withdraw utxos should have been created for
+every participant. If a subset of them are willingly to keep alive the off-chain protocol, they must
+re-spent the generated utxos to a new shared-owned one. This new utxo serves as the new root of
+the chain of pre-signed transaction.
+
+The payment pool construction proposes to solve this partition issue by encoding all the participants
+withdraw abilities in a Taproot merkle tree. To each tapscript leaf is attached a pre-signed
+withdraw transaction sending the balance to the withdrawing participant address and committing back
+the funds into an unified utxo. As all the combination of withdraw sequences must be foreseen, this
+mechanism suffers from factorial complexity for high number of participants. All the possible
+states and transitions must be covered, therefore factorial signatures generation time, factorial
+transactions storage and factorial signatures exchanges rounds.
+
+This proposal introduces a new script interpreter extension <code>OP\_MERKLESUB</code> to efficiently
+solve this factorial complexity. This factorial complexity manifests itself by three vectors :
+the parent txid, the state of the output amount and the state of the merkle tree. While BIP
+118 <code>SIGHASH\_ANYPREVOUT</code> and <code>SIGHASH\_GROUP</code> are removing the dependencies
+of the two first vectors, <code>OP\_MERKLESUB</code> discards the lastest one. By allowing a
+modified version of the spent merkle tree to be inherited on the spending transaction output,
+a withdraw transaction does not have to be knowledgeable about the sequence of previous withdraw
+transactions. The spent is valid as long as the corresponding leaf is still present in the spent
+tree.
+
+Additionaly, allowing a modified version of the spent internal key to be also inherited enable
+preservation of the key-path spend across a withdraw sequence. That way, this key-path spend
+can be still employed by the counterparties remaining in the off-chain protocol instance, even
+after exit of a subset of them and without their cooperation.
+
+The primitive is of independent interest for vaults, enabling more powerful stakeholders policies.
+
+==Specification==
+
+This BIP redefines the opcode NOP4 as <code>OP\_MERKLESUB</code> for every type of script.
+
+The following rules apply to <code>OP\_MERKLESUB</code>.
+
+* If fewer than 2 elements on the stack, the script MUST fail and terminate immediately.
+* The ''update public key'' (top element) is popped from the stack.
+** If the public key is not 32 bytes, the script MUST fail and terminate immediately.
+* The <code>CScriptNum</code> <code>output\_pos</code> (second to top element) is popped from the stack.
+** If the <code>output\_pos</code> is inferior to 0, the script MUST fail and terminate immediately.
+* The bit 1 of the control block is interpreted as the internal pubkey ''parity bit''.
+* The x-only internal pubkey is converted to a 64-byte public key with the eveness decided by the ''parity bit''.
+* The ''update public key'' is subtracted from the internal pubkey, the result is interpreted as the ''modified internal pubkey I''.
+* The first node of the BIP 341 ''control block'' is interpreted as the new ''tapleaf hash''.
+* If <code>output\_pos</code> is superior to the number of outputs in the spending transaction, the script MUST fail and terminate immediately.
+* If <code>output\_pos</code> is not a SegWit output, the script MUST fail and terminate immediately.
+* The output at position <code>output\_pos</code> in the spending transaction is interpreted as the ''destination output''.
+** If the ''destination output'' is NOT a witness version 1 output, the script MUST fail and terminate immediately.
+* The new merkle root ''t'' is re-computed from the ''tapleaf hash'' and the ''control block' as defined in BIP 341.
+* Let ''Q = I + int(t)G'' as defined in BIP 341.
+* If the ''destination output'' witness program is NOT equal to ''Q'', the script MUST fail and terminate immediately.
+
+==Security==
+
+TODO
+
+==Copyright==
+
+This document is licensed under the 3-clause BSD license.
+
+==Deployment==
+
+For prototyping simplicity, the present code implements OP\_MERKLESUB as a hardfork. Indeed, 
+non-upgraded nodes are not able to include the internal public key parity bit inside the tweak and
+as such validate a Taproot commitment in compliance with upgraded ones. A softfork version of OP\_MERKLESUB
+should be possible, where the internal parity bit is committed as one-more-tweak on top of the
+Taproot commitment, transparent to non-upgraded nodes.
